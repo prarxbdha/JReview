@@ -1,8 +1,8 @@
 # JReview
 
-JReview is a tiny Java/Spring Boot backend that classifies e-commerce reviews with the Gemini API. It returns one of three labels: `VERIFIED`, `SPAM`, or `TOXIC`.
+JReview is a tiny Java/Spring Boot app that classifies e-commerce reviews with the Gemini API. It returns one of three labels: `VERIFIED`, `SPAM`, or `TOXIC`. It has a REST API and a very small browser page.
 
-It is intentionally small. There is one endpoint, six main classes, no database, no login, and no frontend. The goal is that you can read the whole project in a few minutes and explain it out loud.
+It is intentionally small. There is one REST endpoint, one browser page, eight main classes, no database, and no login. The goal is that you can read the whole project in a few minutes and explain it out loud.
 
 ---
 
@@ -21,7 +21,7 @@ Two important clarifications:
 1. **Negative reviews are not toxic or spam.** A real complaint is `VERIFIED`.
 2. **`VERIFIED` does not mean verified purchase.** It only means the comment reads as a genuine first-hand opinion.
 
-Out of scope for this first version: databases, authentication, queues, frontend, purchase verification, confidence scores, and free-text explanations.
+Out of scope for this first version: databases, authentication, queues, purchase verification, confidence scores, and free-text explanations.
 
 ---
 
@@ -71,6 +71,14 @@ There is no `reason` field. That keeps the code short and the explanation clean.
         POST /v1beta/decisions
 ```
 
+The browser page is just a second door into the same service:
+
+```text
+Browser page ──► FrontendController ──► ReviewInputParser ──┐
+                                                             ├─► ModerationService ──► Gemini
+REST client  ──► ReviewController ───────────────────────────┘
+```
+
 The important idea: **each class has one job**.
 
 - The controller does not know Gemini.
@@ -91,6 +99,8 @@ The important idea: **each class has one job**.
 | `ModerationService.java` | Holds the moderation rules and converts Gemini’s label to `Verdict`. |
 | `GeminiDecisionClient.java` | Sends one request to Gemini and returns the chosen label. |
 | `ApiExceptionHandler.java` | Converts errors into short HTTP responses. |
+| `FrontendController.java` | Serves the browser page and accepts both input forms. |
+| `ReviewInputParser.java` | Turns typed text or pasted JSON into one plain review string. |
 
 ### Tests
 
@@ -99,6 +109,8 @@ The important idea: **each class has one job**.
 | `GeminiDecisionClientTest` | Sends the API key header and parses Gemini’s answer. |
 | `ModerationServiceTest` | Maps all three labels correctly and rejects unknown labels. |
 | `ReviewControllerTest` | Rejects blank text and returns a verdict for valid text. |
+| `ReviewInputParserTest` | Parses JSON input and rejects invalid/blank input. |
+| `FrontendControllerTest` | Serves both input choices and shows verdicts/errors. |
 | `JReviewApplicationTests` | The Spring context starts. |
 
 ### Config
@@ -107,6 +119,7 @@ The important idea: **each class has one job**.
 |---|---|
 | `application.properties` | Holds non-secret config and reads the key from the environment. |
 | `.env.example` | Shows the environment variable name. The real `.env` is gitignored. |
+| `templates/index.html` | The tiny Thymeleaf page with two input forms. |
 
 ---
 
@@ -120,6 +133,8 @@ The important idea: **each class has one job**.
 6. Gemini returns `answers.verdict.choice`, for example `"TOXIC"`.
 7. `ModerationService` converts that string to `Verdict.TOXIC`.
 8. `ReviewController` returns `{"verdict": "TOXIC"}`.
+
+The browser page follows the same path after `ReviewInputParser` turns either input box into the same plain `text`.
 
 ---
 
@@ -188,6 +203,7 @@ That is the whole API call function.
 | Java 25 | Installed locally and current. |
 | Spring Boot 4.2.0 | Gives us REST handling with almost no boilerplate. |
 | Spring `RestClient` | One readable HTTP call, no SDK dependency. |
+| Thymeleaf | Server-rendered HTML with no JavaScript or frontend build step. |
 | Gemini Decision 1 | Purpose-built, fast classification with zero output tokens. |
 | Maven wrapper | Works even when Maven is not installed system-wide. |
 | JUnit + Mockito + MockRestServiceServer | Tests run locally without a real API key. |
@@ -229,6 +245,9 @@ set +a
 
 The app starts on `http://localhost:8080`.
 
+- Open `http://localhost:8080/` for the browser page.
+- The REST API remains at `http://localhost:8080/api/v1/reviews/classify`.
+
 ---
 
 ## 11. API reference
@@ -264,6 +283,19 @@ Response:
   "verdict": "SPAM"
 }
 ```
+
+### Browser page
+
+Open `http://localhost:8080/`. The page has two forms:
+
+1. **Type text** — write the review directly.
+2. **Paste JSON** — paste the same request body the REST API accepts:
+
+```json
+{"text":"This product broke after two days."}
+```
+
+Both forms submit to `POST /moderate`. `ReviewInputParser` converts either choice into one `String`, then the page calls the same `ModerationService` as the REST API. There is no JavaScript and no separate frontend build.
 
 ### Errors
 
@@ -317,6 +349,8 @@ What is tested:
 - An unknown label throws an exception.
 - Blank text returns `400`.
 - Valid text returns `200`.
+- Typed text and pasted JSON both produce a verdict on the page.
+- Invalid JSON and blank text show friendly page errors.
 - The Spring context starts.
 
 No real Gemini call happens in tests. No API key is required.
@@ -377,7 +411,7 @@ Possible next steps:
 
 ## 17. Explain this project in 5 minutes
 
-> “JReview is a Spring Boot service with one endpoint. The controller validates the review text. The service owns the moderation rules: toxic first, spam second, verified otherwise. A negative but genuine review is still verified. The client makes one HTTP call to Gemini Decision 1, which is built for classification and generates zero output tokens. We read the chosen label, convert it to an enum, and return it as JSON. The API key comes from an environment variable and never appears in code. Tests stub Gemini, so CI needs no secrets.”
+> “JReview is a Spring Boot app with one REST endpoint and one tiny browser page. The page has two input choices: type text or paste JSON. ReviewInputParser turns both into one plain string, so the rest of the flow is shared. The controller validates the review text. The service owns the moderation rules: toxic first, spam second, verified otherwise. A negative but genuine review is still verified. The client makes one HTTP call to Gemini Decision 1, which is built for classification and generates zero output tokens. We read the chosen label, convert it to an enum, and show it as JSON on the page or in the API response. The API key comes from an environment variable and never appears in code. Tests stub Gemini, so CI needs no secrets.”
 
 ---
 
@@ -389,4 +423,5 @@ Possible next steps:
 | `429` from Gemini | Rate limit reached | Wait, reduce traffic, or check AI Studio limits. |
 | Blank text returns `400` | Validation worked as intended | Send non-empty `text`. |
 | Unknown label returns `502` | Gemini returned an unexpected value | Check model/config; JReview refuses to guess. |
+| Page says "not valid JSON" | JSON box is missing quotes or the `text` field | Use `{"text":"Your review"}`. |
 | Tests fail before reaching Gemini | Java or Maven wrapper issue | Use Java 25 and run `./mvnw clean verify`. |
