@@ -1,14 +1,14 @@
 # JReview
 
-JReview is a tiny Java/Spring Boot app that classifies e-commerce reviews with the Gemini API. It returns one of three labels: `VERIFIED`, `SPAM`, or `TOXIC`. It has a REST API and a very small browser page.
+JReview is a tiny Java console application that classifies e-commerce reviews with a **local Ollama model**. It returns one of three labels: `VERIFIED`, `SPAM`, or `TOXIC`.
 
-It is intentionally small. There is one REST endpoint, one browser page, eight main classes, no database, and no login. The goal is that you can read the whole project in a few minutes and explain it out loud.
+It runs in the terminal. There is no browser page, no web server, no API key, and no database. After the model is downloaded once, classification works fully offline. The goal is that you can read the whole project in a few minutes and explain it out loud.
 
 ---
 
 ## 1. What the project does
 
-Send review text to JReview. JReview asks Gemini Decision 1 to pick one label.
+Type a review, or paste several reviews as JSON. JReview asks a local Ollama model to pick one label per review.
 
 | Label | Meaning | Example |
 |---|---|---|
@@ -21,69 +21,57 @@ Two important clarifications:
 1. **Negative reviews are not toxic or spam.** A real complaint is `VERIFIED`.
 2. **`VERIFIED` does not mean verified purchase.** It only means the comment reads as a genuine first-hand opinion.
 
-Out of scope for this first version: databases, authentication, queues, purchase verification, confidence scores, and free-text explanations.
+Out of scope for this first version: databases, authentication, queues, purchase verification, confidence scores, and model-written explanations.
 
 ---
 
-## 2. Why Gemini Decision 1
+## 2. Why a local model
 
-JReview used to be planned around a chat model. It now uses **Gemini Decision 1**, a model built specifically for classification.
+JReview used to call a hosted decision API. It now runs a small instruction-tuned model through Ollama on your own machine.
 
-| Chat model | Decision model |
+| Hosted API | Local Ollama |
 |---|---|
-| Generates text you must parse | Returns typed answers directly |
-| Output tokens cost/latency matter | Zero output tokens |
-| Good for summaries and explanations | Good for labels, yes/no, and scores |
+| Needs an API key and account | No key, no account |
+| Sends review text off-machine | Text never leaves the machine |
+| Per-request cost and rate limits | Free after the one-time model download |
+| Requires internet at runtime | Works offline |
 
-Gemini Decision 1 returns probabilities and a chosen label. JReview only reads the chosen label, so there is no JSON parsing of model-written text.
-
-Because of that, the API response is intentionally minimal:
-
-```json
-{
-  "verdict": "VERIFIED"
-}
-```
-
-There is no `reason` field. That keeps the code short and the explanation clean.
+The tradeoff is that your hardware sets the speed. A 3B–4B model is plenty for a three-way label and runs comfortably on a normal laptop.
 
 ---
 
 ## 3. Architecture
 
 ```text
-          HTTP POST /api/v1/reviews/classify
-                        │
-                        ▼
-              ReviewController
-              (reads JSON, validates text)
-                        │
-                        ▼
-              ModerationService
-              (owns the moderation rules)
-                        │
-                        ▼
-             GeminiDecisionClient
-             (builds request, calls Gemini)
-                        │
-                        ▼
-        Gemini API — gemini-decision-1
-        POST /v1beta/decisions
-```
-
-The browser page is just a second door into the same service:
-
-```text
-Browser page ──► FrontendController ──► ReviewInputParser ──┐
-                                                             ├─► ModerationService ──► Gemini
-REST client  ──► ReviewController ───────────────────────────┘
+          Terminal menu
+                │
+                ▼
+             ReviewCli
+     (1) Custom input / (2) JSON multiple inputs
+                │
+                ▼
+         ReviewInputParser
+     (turns input into plain strings)
+                │
+                ▼
+          ModerationService
+        (owns the moderation rules)
+                │
+                ▼
+           OllamaClient
+   (one /api/chat call per review)
+                │
+                ▼
+   Ollama daemon — http://localhost:11434
+   POST /api/chat  →  {"verdict":"TOXIC|SPAM|VERIFIED"}
 ```
 
 The important idea: **each class has one job**.
 
-- The controller does not know Gemini.
-- The service does not know HTTP.
-- The client does not know what the labels mean.
+- The CLI does no moderation; it only reads input and prints output.
+- The parser knows about the two input modes, but nothing about Ollama.
+- The service owns the rules, but does no terminal I/O.
+- The client knows HTTP and JSON, but not what the labels mean.
 
 ---
 
@@ -93,54 +81,47 @@ The important idea: **each class has one job**.
 
 | File | Job |
 |---|---|
-| `JReviewApplication.java` | Starts the Spring Boot app. |
+| `JReviewApplication.java` | Starts the app without a web server, then launches the CLI. |
+| `ReviewCli.java` | Shows the menu, reads both input modes, prints verdicts. |
+| `ReviewInputParser.java` | Validates input and turns it into one or more plain review strings. |
+| `ModerationService.java` | Holds the moderation rules and converts the model’s label to `Verdict`. |
+| `OllamaClient.java` | Sends one constrained chat request to Ollama and returns the chosen label. |
 | `Verdict.java` | Defines the three allowed labels. |
-| `ReviewController.java` | Exposes the REST endpoint and validates input. |
-| `ModerationService.java` | Holds the moderation rules and converts Gemini’s label to `Verdict`. |
-| `GeminiDecisionClient.java` | Sends one request to Gemini and returns the chosen label. |
-| `ApiExceptionHandler.java` | Converts errors into short HTTP responses. |
-| `FrontendController.java` | Serves the browser page and accepts both input forms. |
-| `ReviewInputParser.java` | Turns typed text or pasted JSON into one plain review string. |
 
 ### Tests
 
 | File | What it proves |
 |---|---|
-| `GeminiDecisionClientTest` | Sends the API key header and parses Gemini’s answer. |
+| `OllamaClientTest` | Sends the expected `/api/chat` request and parses the JSON answer. |
 | `ModerationServiceTest` | Maps all three labels correctly and rejects unknown labels. |
-| `ReviewControllerTest` | Rejects blank text and returns a verdict for valid text. |
-| `ReviewInputParserTest` | Parses JSON input and rejects invalid/blank input. |
-| `FrontendControllerTest` | Serves both input choices and shows verdicts/errors. |
-| `JReviewApplicationTests` | The Spring context starts. |
+| `ReviewInputParserTest` | Parses typed text and JSON arrays, and rejects invalid input. |
+| `ReviewCliTest` | Both menu modes print verdicts; errors stay friendly. |
+| `JReviewApplicationTests` | The Spring context starts without a web server. |
 
 ### Config
 
 | File | Job |
 |---|---|
-| `application.properties` | Holds non-secret config and reads the key from the environment. |
-| `.env.example` | Shows the environment variable name. The real `.env` is gitignored. |
-| `templates/index.html` | The tiny Thymeleaf page with two input forms. |
+| `application.properties` | Non-secret config: Ollama URL, model name, temperature, context size. |
 
 ---
 
 ## 5. Request flow, step by step
 
-1. A client sends `POST /api/v1/reviews/classify` with `{"text": "..."}`.
-2. `ReviewController` checks that `text` is not blank.
-3. `ReviewController` calls `ModerationService.moderate(text)`.
-4. `ModerationService` supplies the moderation rules as a question with three choices.
-5. `GeminiDecisionClient` builds a decision request and posts it to Gemini.
-6. Gemini returns `answers.verdict.choice`, for example `"TOXIC"`.
+1. The app starts and shows a menu with options `1`, `2`, and `0`.
+2. In **Custom input** mode, you type one review. In **JSON multiple inputs** mode, you paste an array and finish with an empty line.
+3. `ReviewInputParser` validates the input and returns plain review string(s).
+4. `ModerationService` writes the moderation rules into a system prompt with three choices.
+5. `OllamaClient` posts one chat request to Ollama per review, with JSON output forced to a single `verdict` field.
+6. Ollama returns `{"verdict":"TOXIC"}` in `message.content`.
 7. `ModerationService` converts that string to `Verdict.TOXIC`.
-8. `ReviewController` returns `{"verdict": "TOXIC"}`.
-
-The browser page follows the same path after `ReviewInputParser` turns either input box into the same plain `text`.
+8. `ReviewCli` prints the verdict and a short fixed explanation. In JSON mode it also prints a results table and a summary count.
 
 ---
 
 ## 6. Moderation rules
 
-The rule order is written directly into the question sent to Gemini:
+The rule order is written directly into the system prompt sent to Ollama:
 
 1. **TOXIC first** — harassment, hate, threats, or personal abuse.
 2. **SPAM second** — promotions, affiliate links, giveaways, phishing, or fake content.
@@ -152,47 +133,45 @@ The prompt explicitly says:
 
 Why this matters: “This product is terrible and broke immediately” is `VERIFIED`, not `TOXIC`. Deciding otherwise would punish honest criticism.
 
-Unknown labels do **not** become `VERIFIED`. They cause a `502` response. This prevents a bad model response from silently approving content.
+Unknown labels do **not** become `VERIFIED`. The CLI reports that moderation is unavailable, so a bad model answer cannot silently approve content.
 
 ---
 
-## 7. The Gemini request
+## 7. The Ollama request
 
-`GeminiDecisionClient` builds this shape:
+`OllamaClient` builds this shape:
 
 ```json
 {
-  "model": "gemini-decision-1",
-  "input": "This product broke after two days. Very disappointed.",
-  "questions": {
-    "verdict": {
-      "type": "choice",
-      "instructions": "Classify this e-commerce review...",
-      "criteria": {
-        "TOXIC": "Harassment, hate, threats, or personal abuse.",
-        "SPAM": "Promotion, affiliate links, giveaways, phishing, or fake content.",
-        "VERIFIED": "A genuine first-hand opinion. Positive or negative."
-      }
-    }
-  }
+  "model": "qwen3.5:4b",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Classify this e-commerce review. ...\n\nRules:\n- TOXIC: ...\n- SPAM: ...\n- VERIFIED: ..."
+    },
+    { "role": "user", "content": "This product broke after two days." }
+  ],
+  "stream": false,
+  "think": false,
+  "format": {
+    "type": "object",
+    "properties": {
+      "verdict": { "type": "string", "enum": ["VERIFIED", "SPAM", "TOXIC"] }
+    },
+    "required": ["verdict"]
+  },
+  "options": { "temperature": 0, "num_ctx": 1024 }
 }
 ```
 
 It sends:
 
 ```text
-POST https://generativelanguage.googleapis.com/v1beta/decisions
-x-goog-api-key: $GEMINI_API_KEY
+POST http://localhost:11434/api/chat
 Content-Type: application/json
 ```
 
-It reads only:
-
-```text
-answers.verdict.choice
-```
-
-That is the whole API call function.
+It reads only `message.content`, parses it as JSON, and takes `verdict`. The `format` schema and `temperature: 0` keep the answer short and repeatable; `think: false` avoids a long reasoning trace.
 
 ---
 
@@ -201,121 +180,126 @@ That is the whole API call function.
 | Choice | Why |
 |---|---|
 | Java 25 | Installed locally and current. |
-| Spring Boot 4.2.0 | Gives us REST handling with almost no boilerplate. |
-| Spring `RestClient` | One readable HTTP call, no SDK dependency. |
-| Thymeleaf | Server-rendered HTML with no JavaScript or frontend build step. |
-| Gemini Decision 1 | Purpose-built, fast classification with zero output tokens. |
+| Spring Boot 4.2.0 (non-web) | Gives us dependency injection and configuration with almost no boilerplate. |
+| Spring `RestClient` | One readable HTTP call to Ollama, no SDK dependency. |
+| Jackson `ObjectMapper` | Parses the JSON array typed into the console and the model’s answer. |
+| Ollama | Runs small open models locally with a simple HTTP API. |
+| JUnit + Mockito + MockRestServiceServer | Tests run locally without a model or network. |
 | Maven wrapper | Works even when Maven is not installed system-wide. |
-| JUnit + Mockito + MockRestServiceServer | Tests run locally without a real API key. |
+
+No Thymeleaf, no REST controllers, no JavaScript, and no cloud API key: the application is Java only.
 
 ---
 
-## 9. Prerequisites
+## 9. Recommended model
 
-- Java 25
-- A Gemini API key from [Google AI Studio](https://aistudio.google.com/api-keys)
-- `curl` for testing
-- Git and GitHub CLI if you want to push the repository
+**Download this one:**
+
+```bash
+ollama pull qwen3.5:4b
+```
+
+- About 3.3–4.0 GB, fits a 4 GB GPU with RAM overflow
+- Strong instruction-following, which matters for the “negative review is still VERIFIED” rule
+- Apache 2.0 license
+
+**If it feels slow:**
+
+```bash
+ollama pull qwen3.5:2b
+```
+
+About 2.7–3.1 GB, faster and fully in VRAM, slightly less reliable on edge cases. The first download needs internet; after that, JReview is offline. You can switch models at any time with `OLLAMA_MODEL=...` (see Configuration).
 
 ---
 
 ## 10. Run it locally
 
-Create a local `.env` file if you want, or simply export the variable:
-
 ```bash
-export GEMINI_API_KEY="your-new-key-here"
+ollama pull qwen3.5:4b
 ./mvnw spring-boot:run
 ```
 
-If you use `.env`:
+Ollama normally starts its daemon automatically. If it is not running:
 
 ```bash
-GEMINI_API_KEY=your-new-key-here
+ollama serve
 ```
 
-Then load it:
+You can also build a jar and run it directly:
 
 ```bash
-set -a
-source .env
-set +a
-./mvnw spring-boot:run
+./mvnw clean package
+java -jar target/JReview-0.0.1-SNAPSHOT.jar
 ```
 
-The app starts on `http://localhost:8080`.
-
-- Open `http://localhost:8080/` for the browser page.
-- The REST API remains at `http://localhost:8080/api/v1/reviews/classify`.
+The app prints its menu in the terminal. **It does not open an HTTP port.**
 
 ---
 
-## 11. API reference
+## 11. Console reference
 
-### Classify a review
+### Menu
 
-```bash
-curl -X POST http://localhost:8080/api/v1/reviews/classify \
-  -H "Content-Type: application/json" \
-  -d '{"text":"This product broke after two days. Very disappointed."}'
+```text
+1) Custom input
+2) JSON multiple inputs
+0) Exit
+Choose an option:
 ```
 
-Success:
+### 1) Custom input
 
-```json
-{
-  "verdict": "VERIFIED"
-}
+Type one review at the prompt:
+
+```text
+Choose an option: 1
+Review text: Broke after two days. Very disappointed.
+
+Review:  Broke after two days. Very disappointed.
+Verdict: VERIFIED — genuine first-hand opinion (positive or negative)
 ```
 
-Another example:
+### 2) JSON multiple inputs
 
-```bash
-curl -X POST http://localhost:8080/api/v1/reviews/classify \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Visit my site for a free iPhone giveaway!"}'
+Paste a JSON array of objects, each with a non-blank `text` field. Finish with an empty line:
+
+```text
+Choose an option: 2
+Paste a JSON array of objects with a text field, for example:
+[{"text":"Great product"},{"text":"Click my link!"}]
+Finish with an empty line.
+[
+  {"text": "Great product"},
+  {"text": "Click my link!"},
+  {"text": "Anyone who bought this is an idiot."}
+]
+
+#    VERDICT    REVIEW
+1    VERIFIED   Great product
+2    SPAM       Click my link!
+3    TOXIC      Anyone who bought this is an idiot.
+
+Summary: 3 review(s) — VERIFIED 1, SPAM 1, TOXIC 1
 ```
 
-Response:
+Rules for this mode:
 
-```json
-{
-  "verdict": "SPAM"
-}
-```
-
-### Browser page
-
-Open `http://localhost:8080/`. The page has two forms:
-
-1. **Type text** — write the review directly.
-2. **Paste JSON** — paste the same request body the REST API accepts:
-
-```json
-{"text":"This product broke after two days."}
-```
-
-Both forms submit to `POST /moderate`. `ReviewInputParser` converts either choice into one `String`, then the page calls the same `ModerationService` as the REST API. There is no JavaScript and no separate frontend build.
+- The input must be a JSON **array**, not a single object.
+- Every item must be an object with a non-blank string `text`.
+- At most 100 reviews per batch.
+- Each review is one Ollama call, so large batches take longer.
 
 ### Errors
 
-Blank text:
-
-```json
-{
-  "timestamp": "...",
-  "status": 400,
-  "error": "Bad Request"
-}
+```text
+Error: Review text must not be blank.
+Error: That is not valid JSON.
+Error: JSON must be a non-empty array of objects with a "text" field.
+Ollama is unavailable. Is 'ollama serve' running with the model pulled?
 ```
 
-Gemini unavailable, bad key, rate limit, or malformed label:
-
-```json
-Gemini moderation is unavailable
-```
-
-with HTTP status `502`.
+Bad input returns you to the menu; it never ends the app.
 
 ---
 
@@ -325,11 +309,19 @@ Defined in `src/main/resources/application.properties`:
 
 | Property | Default | Purpose |
 |---|---|---|
-| `gemini.api.key` | `${GEMINI_API_KEY:}` | Secret key sent in `x-goog-api-key`. |
-| `gemini.api.base-url` | `https://generativelanguage.googleapis.com` | Gemini host. |
-| `gemini.api.model` | `gemini-decision-1` | The classification model. |
+| `ollama.base-url` | `http://localhost:11434` | Local Ollama daemon URL. |
+| `ollama.model` | `qwen3.5:4b` | Model tag used for classification. |
+| `ollama.temperature` | `0` | Keeps answers deterministic. |
+| `ollama.num-ctx` | `1024` | Small context window for short reviews. |
 
-The empty default for the key exists so tests can start without secrets. Real classification still requires a valid key.
+Override without editing files using environment variables:
+
+```bash
+OLLAMA_MODEL=qwen3.5:2b ./mvnw spring-boot:run
+OLLAMA_BASE_URL=http://localhost:11434 ./mvnw spring-boot:run
+```
+
+There is no secret to configure.
 
 ---
 
@@ -343,46 +335,33 @@ Run:
 
 What is tested:
 
-- The Gemini client sends the expected path, header, and body.
-- A canned Gemini answer is parsed correctly.
+- The Ollama client sends the expected path, model, JSON schema, and non-streaming flags.
+- A canned Ollama answer is parsed correctly; malformed answers are rejected.
 - `TOXIC`, `SPAM`, and `VERIFIED` map to the enum.
 - An unknown label throws an exception.
-- Blank text returns `400`.
-- Valid text returns `200`.
-- Typed text and pasted JSON both produce a verdict on the page.
-- Invalid JSON and blank text show friendly page errors.
-- The Spring context starts.
+- Typed text and JSON arrays are parsed; blank, malformed, oversized, and missing-field input is rejected.
+- Both CLI modes print verdicts and show friendly errors.
+- The Spring context starts without a web server.
 
-No real Gemini call happens in tests. No API key is required.
+No real model call happens in tests, so no Ollama daemon is required.
 
 ---
 
-## 14. Costs and free tier
+## 14. Offline and privacy
 
-For `gemini-decision-1`:
-
-- Free tier: input tokens are free.
-- Output tokens: always zero.
-- Paid tier, if ever needed: `$0.10` per 1M input tokens.
-- Rate limits still apply. Check them in AI Studio.
-
-Caveats:
-
-- The free tier is rate-limited, not unlimited.
-- On the free tier, content may be used to improve Google’s products.
-- Avoid sending real customer PII on the free tier.
-- If you hit a limit, Gemini returns an error and JReview responds with `502`.
+- Once the model is pulled, JReview makes **no internet calls**.
+- Review text is sent only to `localhost:11434`; it never leaves the machine.
+- There is no API key, account, bill, or rate limit.
+- Generation is local, so speed depends on your CPU/GPU; the first call also loads the model into memory.
 
 ---
 
 ## 15. Security notes
 
-- The key is read from `GEMINI_API_KEY`; it is never hardcoded.
-- `.env` is gitignored.
-- The key is sent as a header, not in the URL.
-- JReview does not log the key.
-- If a key was ever pasted into chat or a ticket, rotate it in Google AI Studio.
-- For production, add authentication, request size limits, and abuse protection.
+- No credentials exist in code, config, or the environment.
+- Ollama listens on localhost by default; do not expose it to an untrusted network.
+- Review text stays on the machine, which makes local moderation suitable for sensitive content.
+- For production, add authentication and abuse protection before exposing this to untrusted users.
 
 ---
 
@@ -395,23 +374,22 @@ This first version does not:
 - provide model-written explanations;
 - handle multiple languages explicitly;
 - provide a human review queue;
-- protect against abuse or high traffic;
-- add confidence thresholds.
+- add confidence thresholds;
+- call Ollama concurrently for a batch (reviews are classified one after another).
 
 Possible next steps:
 
-1. Add confidence thresholds from Gemini’s `confidence` field.
+1. Add a confidence signal by asking the model for a score alongside the label.
 2. Send low-confidence reviews to human review.
-3. Add request logging without storing review text.
-4. Add Spring Security.
-5. Add a database only if you need an audit trail.
-6. Add a GitHub Actions workflow running `./mvnw -B verify`.
+3. Parallelize batch calls if throughput matters.
+4. Add structured logging without storing review text.
+5. Add a GitHub Actions workflow running `./mvnw -B verify`.
 
 ---
 
 ## 17. Explain this project in 5 minutes
 
-> “JReview is a Spring Boot app with one REST endpoint and one tiny browser page. The page has two input choices: type text or paste JSON. ReviewInputParser turns both into one plain string, so the rest of the flow is shared. The controller validates the review text. The service owns the moderation rules: toxic first, spam second, verified otherwise. A negative but genuine review is still verified. The client makes one HTTP call to Gemini Decision 1, which is built for classification and generates zero output tokens. We read the chosen label, convert it to an enum, and show it as JSON on the page or in the API response. The API key comes from an environment variable and never appears in code. Tests stub Gemini, so CI needs no secrets.”
+> “JReview is a Java console app with one terminal menu and two input modes. Custom input takes one review typed at the prompt; JSON multiple inputs takes an array of objects with a `text` field, finished with an empty line. `ReviewInputParser` turns both into plain strings, so the rest of the flow is shared. The service owns the moderation rules: toxic first, spam second, verified otherwise. A negative but genuine review is still verified. The client makes one local call to Ollama per review, with a JSON schema that forces the answer to one of three labels, and we print that label with a short fixed explanation. There is no API key and no data leaves the machine. Tests stub Ollama, so CI needs no model or network.”
 
 ---
 
@@ -419,9 +397,9 @@ Possible next steps:
 
 | Problem | Likely cause | Fix |
 |---|---|---|
-| App starts but requests return `502` | Missing or invalid `GEMINI_API_KEY` | Export a fresh key and restart. |
-| `429` from Gemini | Rate limit reached | Wait, reduce traffic, or check AI Studio limits. |
-| Blank text returns `400` | Validation worked as intended | Send non-empty `text`. |
-| Unknown label returns `502` | Gemini returned an unexpected value | Check model/config; JReview refuses to guess. |
-| Page says "not valid JSON" | JSON box is missing quotes or the `text` field | Use `{"text":"Your review"}`. |
-| Tests fail before reaching Gemini | Java or Maven wrapper issue | Use Java 25 and run `./mvnw clean verify`. |
+| “Ollama is unavailable” | Daemon is not running | Run `ollama serve` in another terminal. |
+| Model-not-found error | Model not pulled | Run `ollama pull qwen3.5:4b` (or your configured `OLLAMA_MODEL`). |
+| Classification is slow | Model too large for the GPU, or first load | Try `OLLAMA_MODEL=qwen3.5:2b`; the first call loads the model. |
+| Bad input shows an error | Validation worked as intended | Enter non-empty text or use `[{"text":"Your review"}]`. |
+| Unknown label shows an error | Model returned an unexpected value | Check the prompt/model; JReview refuses to guess. |
+| Tests fail before reaching Ollama | Java or Maven wrapper issue | Use Java 25 and run `./mvnw clean verify`. |
